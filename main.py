@@ -1,4 +1,12 @@
-"""
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route("/health")
+def health():
+    return "ok", 200
+
 main.py — Single-threaded event loop for the Polymarket trading bot.
 
 IMPROVEMENT 1: Removed all background threads. Everything runs sequentially
@@ -319,3 +327,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         _log.info("KeyboardInterrupt — exiting.")
         sys.exit(0)
+def run_health_server():
+    app.run(host="0.0.0.0", port=8080)
+
+threading.Thread(target=run_health_server).start()
