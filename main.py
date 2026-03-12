@@ -6,13 +6,18 @@ app = Flask(__name__)
 @app.route("/health")
 def health():
     return "ok", 200
+def run_health_server():
+    app.run(host="0.0.0.0", port=8080)
 
-main.py — Single-threaded event loop for the Polymarket trading bot.
+# START HEALTH SERVER IMMEDIATELY
+threading.Thread(target=run_health_server, daemon=True).start()
+#main.py — Single-threaded event loop for the Polymarket trading bot.
 
-IMPROVEMENT 1: Removed all background threads. Everything runs sequentially
-in one loop with timed sub-tasks, eliminating race conditions and reducing
-CPU context-switch overhead.
+#IMPROVEMENT 1: Removed all background threads. Everything runs sequentially
+#in one loop with timed sub-tasks, eliminating race conditions and reducing
+#CPU context-switch overhead.
 
+"""
 Loop structure (every SCAN_INTERVAL_SEC seconds):
   1. scan markets
   2. liquidity filter
