@@ -5,9 +5,9 @@ import signal
 import sys
 import time
 import threading
-from flask import Flask
 import csv
 from datetime import datetime
+
 from flask import Flask, jsonify
 
 # -------------------------------------------------------------------
@@ -27,10 +27,14 @@ bot_status = {
     "last_cycle_time": 0.0
 }
 
+
 @app.route("/")
 def home():
     return "Polymarket Bot Running", 200
-@@ -22,12 +35,97 @@
+
+
+@app.route("/health")
+def health():
     return "ok", 200
 
 
@@ -67,9 +71,7 @@ def dashboard():
         let html = ""
 
         for (const [k,v] of Object.entries(data)){
-
             html += `<div class="card"><b>${k}</b>: ${v}</div>`
-
         }
 
         document.getElementById("stats").innerHTML = html
@@ -126,28 +128,48 @@ def log_trade_csv(action, market_id, side, size, price, pnl=None):
 
 
 # -------------------------------------------------------------------
-# Bot Imports
+# BOT IMPORTS
 # -------------------------------------------------------------------
-@@ -67,6 +165,7 @@
+
+from polymarket_bot import config
+from polymarket_bot import logging as log_mod
+from polymarket_bot.market_scanner import MarketScanner
+from polymarket_bot.liquidity_filter import LiquidityFilter
+from polymarket_bot.edge_calculator import EdgeCalculator
+from polymarket_bot.portfolio import Portfolio
+from polymarket_bot.risk_manager import RiskManager
+from polymarket_bot.trade_sizer import TradeSizer
+from polymarket_bot.monte_carlo_validator import MonteCarloValidator
+from polymarket_bot.trader import Trader
+
+_log = log_mod.get_logger()
+
+_running = True
+
+
+# -------------------------------------------------------------------
+# BOT RUN LOOP
 # -------------------------------------------------------------------
 
 def run():
 
-    _log.info(
-        "Polymarket Bot starting",
-        extra={
-@@ -75,10 +174,6 @@
-            "_confidence_thresh": config.CONFIDENCE_THRESHOLD,
-            "_max_capital": config.MAX_TOTAL_CAPITAL_DEPLOYED,
-            "_scan_interval": config.SCAN_INTERVAL_SEC,
-            "_mc_df": config.MONTE_CARLO_DF,
-            "_max_slippage": config.MAX_SLIPPAGE_PERCENT,
-            "_max_daily_loss_pct": config.MAX_DAILY_LOSS_PERCENT,
-            "_cross_edge_thresh": config.CROSS_MARKET_EDGE_THRESHOLD,
-        },
-    )
+    scanner = MarketScanner()
+    liq_filt = LiquidityFilter()
+    edge_calc = EdgeCalculator()
+    portfolio = Portfolio()
+    risk_mgr = RiskManager()
+    sizer = TradeSizer()
+    mc_val = MonteCarloValidator()
+    trader = Trader()
 
-@@ -103,6 +198,7 @@
+    cached_cross_scores = {}
+
+    cycle = 0
+
+    while _running:
+
+        cycle += 1
+
         cycle_start = time.monotonic()
 
         try:
@@ -155,7 +177,12 @@ def run():
             cross_signals_count = _run_cycle(
                 cycle,
                 scanner,
-@@ -115,23 +211,21 @@
+                liq_filt,
+                edge_calc,
+                portfolio,
+                risk_mgr,
+                sizer,
+                mc_val,
                 trader,
                 cached_cross_scores,
             )
@@ -164,18 +191,6 @@ def run():
 
             log_mod.log_error(f"Unhandled error in cycle {cycle}", exc)
             cross_signals_count = 0
-
-        if cycle % 10 == 0:
-            summary = portfolio.summary()
-            _log.info(
-                "portfolio_summary",
-                extra={
-                    "_summary": summary,
-                    "_cb_tripped": risk_mgr.circuit_breaker_tripped,
-                    "_daily_pnl": round(risk_mgr.daily_pnl, 4),
-                    "_cross_signals": cross_signals_count,
-                },
-            )
 
         elapsed = time.monotonic() - cycle_start
 
@@ -189,144 +204,105 @@ def run():
         sleep = max(0.0, config.SCAN_INTERVAL_SEC - elapsed)
 
         if _running:
-@@ -157,20 +251,10 @@
+            time.sleep(sleep)
+
+
+# -------------------------------------------------------------------
+# RUN SINGLE SCAN CYCLE
+# -------------------------------------------------------------------
+
+def _run_cycle(
+    cycle,
+    scanner,
+    liq_filt,
+    edge_calc,
+    portfolio,
+    risk_mgr,
+    sizer,
+    mc_val,
+    trader,
     cached_cross_scores,
 ):
 
     if risk_mgr.circuit_breaker_tripped:
 
-        _log.warning(
-            "circuit_breaker_tripped_no_new_trades",
-            extra={"_daily_pnl": round(risk_mgr.daily_pnl, 4)},
-        )
-
         trader.check_fills()
         trader.cancel_stale_orders()
         _check_exits(portfolio, risk_mgr, trader)
-    all_markets = scanner.get_markets()
 
         return 0
-    bot_status["markets_scanned"] = len(all_markets)
 
     all_markets = scanner.get_markets()
+
+    bot_status["markets_scanned"] = len(all_markets)
+
     liquid_markets = liq_filt.filter(all_markets)
 
-    cross_signals_count = 0
-@@ -197,12 +281,7 @@
+    candidates = edge_calc.evaluate(
+        liquid_markets,
         cross_market_scores=cached_cross_scores,
     )
 
-    log_mod.log_scan(
-        markets_found=len(all_markets),
-        markets_filtered=len(all_markets) - len(liquid_markets),
-        candidates=len(candidates),
-        cross_signals=cross_signals_count,
-    )
     bot_status["candidates_found"] = len(candidates)
 
-    if candidates:
+    cross_signals_count = 0
 
-@@ -211,20 +290,7 @@
+    for er in candidates:
 
-        for er in candidates:
+        if portfolio.has_position_in_market(er.market.market_id):
+            continue
 
-            if not _running:
-                break
+        sized = sizer.size(er)
 
-            if portfolio.has_position_in_market(er.market.market_id):
+        if not sized.approved:
+            continue
 
-                log_mod.log_skipped_trade(
-                    er.market.market_id,
-                    er.side,
-                    "already_have_position",
-                    er.edge,
-                    er.confidence,
-                    er.signal_type,
-                )
+        mc = mc_val.validate(er)
 
-                continue
+        if not mc.passes:
+            continue
 
-            token_idx = 0 if er.side == "YES" else 1
-@@ -245,16 +311,6 @@
+        ok = trader.execute(sized)
+
+        if ok:
+
+            log_trade_csv(
+                "open",
+                er.market.market_id,
+                er.side,
+                sized.position_size,
+                sized.entry_price
             )
 
-            if not sized.approved:
+    _check_exits(portfolio, risk_mgr, trader)
 
-                log_mod.log_skipped_trade(
-                    er.market.market_id,
-                    er.side,
-                    sized.reject_reason,
-                    er.edge,
-                    er.confidence,
-                    er.signal_type,
-                )
+    return cross_signals_count
 
-                continue
 
-            mc = mc_val.validate(
-@@ -265,22 +321,20 @@
-            )
+# -------------------------------------------------------------------
+# EXIT CHECKER
+# -------------------------------------------------------------------
 
-            if not mc.passes:
+def _check_exits(portfolio, risk_mgr, trader):
 
-                log_mod.log_skipped_trade(
-                    er.market.market_id,
-                    er.side,
-                    f"monte_carlo_rejected: {mc.reject_reason}",
-                    er.edge,
-                    er.confidence,
-                    er.signal_type,
-                )
+    for pos in portfolio.open_positions():
 
-                continue
+        current_price = trader.get_market_price(pos.market_id, pos.side)
 
-            ok = trader.execute(sized)
-
-            if ok:
-
-                log_trade_csv(
-                    "open",
-                    er.market.market_id,
-                    er.side,
-                    sized.position_size,
-                    best_ask
-                )
-
-                deployed += sized.position_size
-                opens += 1
-
-@@ -311,50 +365,41 @@
         if current_price is None:
             continue
 
-        pnl_pct = (current_price - pos.entry_price) / max(pos.entry_price, 0.001)
         pnl = (current_price - pos.entry_price) * (
             pos.size / max(pos.entry_price, 0.001)
         )
 
-        should_exit, exit_reason = _exit_signal(pos, current_price, pnl_pct)
-        should_exit, exit_reason = _exit_signal(pos, current_price, pnl)
+        should_exit, reason = _exit_signal(pos, current_price, pnl)
 
         if not should_exit:
             continue
 
-        pnl = (current_price - pos.entry_price) * (
-            pos.size / max(pos.entry_price, 0.001)
-        )
-
         risk_mgr.record_closed_pnl(pnl)
 
-        log_mod.log_trade(
-            action="position_closed",
-            market_id=pos.market_id,
-            side=pos.side,
-            edge=0.0,
-            confidence=0.0,
-            size=pos.size,
-            entry_price=pos.entry_price,
-            exit_price=current_price,
-            pnl=pnl,
-            exit_reason=exit_reason,
         log_trade_csv(
             "close",
             pos.market_id,
@@ -339,36 +315,32 @@ def run():
         portfolio.cancel_position(pos.position_id)
 
 
-def _exit_signal(pos, current_price, pnl_pct):
+# -------------------------------------------------------------------
+# EXIT SIGNAL LOGIC
+# -------------------------------------------------------------------
+
 def _exit_signal(pos, current_price, pnl):
 
     pnl_pct = pnl / max(pos.size, 0.001)
 
-    if pnl_pct >= config.MAX_SLIPPAGE_PERCENT * 3:
-        return True, f"take_profit pnl={pnl_pct:.2%}"
     if pnl_pct >= 0.20:
         return True, "take_profit"
 
     if pnl_pct <= -0.10:
-        return True, f"stop_loss pnl={pnl_pct:.2%}"
         return True, "stop_loss"
 
     if current_price >= 0.95 or current_price <= 0.05:
-        return True, f"resolution_proximity price={current_price:.3f}"
-
-    age_sec = time.time() - getattr(pos, "opened_at", time.time())
-
-    if age_sec > 72 * 3600:
-        return True, f"max_age {age_sec/3600:.1f}h"
         return True, "resolution_proximity"
 
     return False, ""
 
-@@ -384,11 +429,10 @@
+
+# -------------------------------------------------------------------
+# ENTRY POINT
+# -------------------------------------------------------------------
 
 if __name__ == "__main__":
 
-    # Start health server for Railway
     threading.Thread(target=run_health_server, daemon=True).start()
 
     try:
