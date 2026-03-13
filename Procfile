@@ -1,1 +1,1 @@
-web: python main.py
+python health_server.py
