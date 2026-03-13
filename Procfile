@@ -1,1 +1,1 @@
-python health_server.py
+web: python health_server.py
