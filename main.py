@@ -9,7 +9,7 @@ from datetime import datetime
 from flask import Flask, jsonify
 
 # --------------------------------------------------
-# Flask Web Server (for Railway healthcheck)
+# Flask Web Server (Railway Healthcheck Safe)
 # --------------------------------------------------
 
 app = Flask(__name__)
@@ -17,6 +17,7 @@ app = Flask(__name__)
 bot_status = {
     "cycles": 0,
     "markets_scanned": 0,
+    "liquid_markets": 0,
     "candidates_found": 0,
     "cross_signals": 0,
     "open_positions": 0,
@@ -127,9 +128,10 @@ def run_bot():
 
     try:
 
-        # Import bot modules INSIDE the thread
+        # Import modules INSIDE thread (Railway safe)
         from polymarket_bot import config
         from polymarket_bot import logging as log_mod
+
         from polymarket_bot.market_scanner import MarketScanner
         from polymarket_bot.liquidity_filter import LiquidityFilter
         from polymarket_bot.edge_calculator import EdgeCalculator
@@ -150,23 +152,31 @@ def run_bot():
         mc_val = MonteCarloValidator()
         trader = Trader()
 
-        cycle = 0
-
         while True:
 
-            cycle += 1
             cycle_start = time.monotonic()
 
             try:
 
-                all_markets = scanner.get_markets()
+                # -------------------------
+                # MARKET SCAN
+                # -------------------------
 
+                all_markets = scanner.get_markets()
                 bot_status["markets_scanned"] = len(all_markets)
 
+                # -------------------------
+                # LIQUIDITY FILTER
+                # -------------------------
+
                 liquid_markets = liq_filt.filter(all_markets)
+                bot_status["liquid_markets"] = len(liquid_markets)
+
+                # -------------------------
+                # EDGE CALCULATION
+                # -------------------------
 
                 candidates = edge_calc.evaluate(liquid_markets)
-
                 bot_status["candidates_found"] = len(candidates)
 
             except Exception as exc:
@@ -182,11 +192,12 @@ def run_bot():
 
     except Exception as e:
 
-        print("BOT CRASHED:", e)
+        # Never crash Flask server
+        print("BOT THREAD CRASHED:", e)
 
 
 # --------------------------------------------------
-# Start Bot Background Thread
+# Start Bot Thread
 # --------------------------------------------------
 
 def start_bot():
@@ -200,7 +211,7 @@ start_bot()
 
 
 # --------------------------------------------------
-# Local Development
+# Local Run
 # --------------------------------------------------
 
 if __name__ == "__main__":
