@@ -2,6 +2,8 @@
 config.py — Central configuration for Polymarket trading bot.
 All values are kept from the working version, with the tuned
 liquidity/edge settings preserved from your edits.
+
+CACHE BUST: v3 — forces __pycache__ invalidation on redeploy
 """
 
 import os
@@ -39,14 +41,14 @@ ORDER_STALE_SEC       = _i("ORDER_STALE_SEC",      120)
 API_MAX_RETRIES       = _i("API_MAX_RETRIES",      4)
 API_RETRY_BACKOFF     = _f("API_RETRY_BACKOFF",    2.0)
 
-# ── Liquidity filter (tuned for real Polymarket conditions) ────────────────────
+# ── Liquidity filter ───────────────────────────────────────────────────────────
 MIN_MARKET_LIQUIDITY  = _f("MIN_MARKET_LIQUIDITY", 800.0)
 MIN_VOLUME_24H        = _f("MIN_VOLUME_24H",        200.0)
 MAX_SPREAD            = _f("MAX_SPREAD",            0.08)
 
-# ── Edge detection (tuned down to find real opportunities) ─────────────────────
-EDGE_THRESHOLD        = _f("EDGE_THRESHOLD",        0.01)
-CONFIDENCE_THRESHOLD  = _f("CONFIDENCE_THRESHOLD",  0.45)
+# ── Edge detection ─────────────────────────────────────────────────────────────
+EDGE_THRESHOLD        = _f("EDGE_THRESHOLD",        0.001)
+CONFIDENCE_THRESHOLD  = _f("CONFIDENCE_THRESHOLD",  0.10)
 
 # ── Capital ────────────────────────────────────────────────────────────────────
 BASE_RISK                  = _f("BASE_RISK",                   10.0)
