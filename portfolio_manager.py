@@ -8,8 +8,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
-from polymarket_bot import config
-from polymarket_bot import logging as log_mod
+import config
+import logger as log_mod
 
 _log = log_mod.get_logger(__name__)
 
