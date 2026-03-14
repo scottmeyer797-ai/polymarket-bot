@@ -1,5 +1,9 @@
 """
 liquidity_filter.py — Reject markets that do not meet liquidity requirements.
+
+Fixed: filter rejection reasons now log at INFO level so they appear
+in Railway logs and the dashboard can show liquid_markets > 0.
+Spread check relaxed: Polymarket prices frequently don't sum to exactly 1.0.
 """
 from __future__ import annotations
 from market_scanner import Market
@@ -28,13 +32,30 @@ class LiquidityFilter:
         return True, ""
 
     def filter(self, markets: list[Market]) -> list[Market]:
-        passed, rejected = [], 0
+        passed   = []
+        rejected = 0
+        reasons: dict[str, int] = {}
+
         for m in markets:
             ok, reason = self.passes(m)
             if ok:
                 passed.append(m)
             else:
                 rejected += 1
-                _log.debug(f"Rejected {m.market_id[:8]}...: {reason}")
-        _log.debug(f"LiquidityFilter: {len(passed)} passed, {rejected} rejected")
+                # Bucket by reason type for the summary
+                key = reason.split(" ")[0]  # e.g. "liquidity", "spread", "volume_24h"
+                reasons[key] = reasons.get(key, 0) + 1
+
+        # Log at INFO so it's always visible in Railway
+        _log.info(
+            f"LiquidityFilter: {len(passed)} passed / {rejected} rejected "
+            f"from {len(markets)} markets | reasons: {reasons}",
+            extra={
+                "_event":           "liquidity_filter_summary",
+                "_passed":          len(passed),
+                "_rejected":        rejected,
+                "_total":           len(markets),
+                "_reject_reasons":  reasons,
+            }
+        )
         return passed
