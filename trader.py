@@ -12,11 +12,11 @@ import uuid
 
 import requests
 
-from polymarket_bot import config
-from polymarket_bot import logging as log_mod
-from polymarket_bot.portfolio import Portfolio, Position
-from polymarket_bot.risk_manager import SizedTrade
-from polymarket_bot.utils import safe_get, safe_post
+import config
+import logger as log_mod
+from portfolio_manager import PortfolioManager as Portfolio, Position
+from risk_manager import SizedTrade
+from utils import safe_get, safe_post
 
 _log = log_mod.get_logger(__name__)
 
