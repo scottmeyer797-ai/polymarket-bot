@@ -8,9 +8,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, List
 
-from polymarket_bot import config
-from polymarket_bot import logging as log_mod
-from polymarket_bot.utils import safe_get
+import config
+import logger as log_mod
+from utils import safe_get
 
 _log = log_mod.get_logger(__name__)
 
