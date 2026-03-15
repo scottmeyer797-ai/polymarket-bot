@@ -1,15 +1,15 @@
 """
 edge_detector.py — Edge detection engine, data-gathering mode.
 
-Model change: shrinkage alpha reduced to near-zero so model probability
-closely tracks market price. Edge is now detected purely from:
-  - spread inefficiency (yes + no != 1.0)
-  - mean reversion from extremes
-  - cross-market contradiction scores
+Edge sources (in order of reliability):
+  1. Spread gap: yes_price + no_price < 1.0 means both sides are underpriced.
+     Buy the cheaper side. Edge = (1.0 - total) / 2
+  2. Overpriced spread: yes + no > 1.0 means the house takes vig.
+     Fade the more overpriced side.
+  3. Extreme reversion: prices above 0.90 or below 0.10 are faded.
 
-This ensures candidates flow through for dry-run data collection.
-Thresholds are read from config so they can be tuned via Railway variables
-without redeploying.
+With EDGE_THRESHOLD=0.001 virtually every market with any spread
+inefficiency will produce a candidate for dry-run data collection.
 """
 from __future__ import annotations
 import math
@@ -54,19 +54,18 @@ class EdgeDetector:
         cross_market_scores: dict[str, float] | None = None,
     ) -> list[EdgeResult]:
 
-        cross_scores   = cross_market_scores or {}
-        candidates:      list[EdgeResult] = []
-        below_edge     = 0
-        below_conf     = 0
-        all_edges:       list[float] = []
+        cross_scores = cross_market_scores or {}
+        candidates:  list[EdgeResult] = []
+        below_edge   = 0
+        below_conf   = 0
+        all_edges:   list[float] = []
 
         for market in markets:
             cross_score = cross_scores.get(market.market_id, 0.0)
             result      = self._evaluate(market, cross_score)
+            all_edges.append(result.edge)
 
-            all_edges.append(abs(result.edge))
-
-            if abs(result.edge) < self.edge_threshold:
+            if result.edge < self.edge_threshold:
                 below_edge += 1
                 continue
 
@@ -89,7 +88,6 @@ class EdgeDetector:
                 },
             )
 
-        # Always-visible diagnostic summary
         max_edge  = round(max(all_edges), 6)  if all_edges else 0.0
         mean_edge = round(sum(all_edges) / len(all_edges), 6) if all_edges else 0.0
         _log.info(
@@ -111,40 +109,55 @@ class EdgeDetector:
             },
         )
 
-        return sorted(candidates, key=lambda r: abs(r.edge) * r.confidence, reverse=True)
+        return sorted(candidates, key=lambda r: r.edge * r.confidence, reverse=True)
 
     def _evaluate(self, market: Market, cross_score: float = 0.0) -> EdgeResult:
-        yes_price = market.yes_price
-        no_price  = market.no_price
+        yes = market.yes_price
+        no  = market.no_price
+        total = yes + no
 
-        # ── Edge source 1: spread inefficiency ────────────────────────────────
-        # If yes + no != 1.0, one side is mispriced. Buy the underpriced side.
-        total       = yes_price + no_price
-        spread_edge = 1.0 - total   # positive = both underpriced, negative = overpriced
+        # ── Primary edge: spread gap ──────────────────────────────────────────
+        # total < 1.0 → both sides underpriced, buy cheaper side
+        # total > 1.0 → both sides overpriced, fade more overpriced side
+        gap = 1.0 - total  # positive = underpriced, negative = overpriced
 
-        # ── Edge source 2: mean reversion from extremes ────────────────────────
-        # Prices near 0 or 1 tend to overshoot — model fades them slightly
-        reversion_yes = self._reversion_adjustment(yes_price)
-        model_yes     = float(np.clip(yes_price + reversion_yes, 0.01, 0.99))
-        model_no      = 1.0 - model_yes
+        # Fair value for each side assuming gap is split equally
+        fair_yes = yes + gap / 2.0
+        fair_no  = no  + gap / 2.0
 
-        edge_yes = (model_yes - yes_price) + (spread_edge * 0.5)
-        edge_no  = (model_no  - no_price)  + (spread_edge * 0.5)
+        # Edge for each side
+        edge_yes = fair_yes - yes  # = gap/2 always
+        edge_no  = fair_no  - no   # = gap/2 always
 
-        if abs(edge_yes) >= abs(edge_no):
-            side, market_prob, model_prob, edge = "YES", yes_price, model_yes, edge_yes
+        # ── Secondary edge: extreme reversion ─────────────────────────────────
+        rev_yes = self._reversion_adj(yes)
+        rev_no  = self._reversion_adj(no)
+
+        edge_yes += rev_yes
+        edge_no  += rev_no
+
+        # Pick the better side
+        if edge_yes >= edge_no:
+            side         = "YES"
+            market_prob  = yes
+            model_prob   = float(np.clip(yes + edge_yes, 0.01, 0.99))
+            edge         = edge_yes
         else:
-            side, market_prob, model_prob, edge = "NO",  no_price,  model_no,  edge_no
+            side         = "NO"
+            market_prob  = no
+            model_prob   = float(np.clip(no + edge_no, 0.01, 0.99))
+            edge         = edge_no
+
+        # Only trade positive edge
+        edge = max(edge, 0.0)
 
         # ── Confidence ─────────────────────────────────────────────────────────
         liq_score    = self._liquidity_score(market)
         spread_score = max(0.0, 1.0 - market.spread / max(config.MAX_SPREAD, 1e-9))
         mom_score    = self._momentum_score(market)
-        mr_score     = self._mean_reversion_score(yes_price)
+        mr_score     = self._mean_reversion_score(yes)
         cm_score     = min(cross_score, 1.0)
 
-        # Simplified confidence — base score from liquidity + spread,
-        # boosted by momentum and cross-market signal
         confidence = float(np.clip(
             0.35 * liq_score
             + 0.25 * spread_score
@@ -161,8 +174,8 @@ class EdgeDetector:
             side=side,
             market_prob=market_prob,
             model_prob=model_prob,
-            edge=edge,
-            confidence=confidence,
+            edge=round(edge, 6),
+            confidence=round(confidence, 4),
             price_volatility=abs(model_prob - 0.50) * 2,
             spread_score=spread_score,
             momentum_score=mom_score,
@@ -172,11 +185,11 @@ class EdgeDetector:
         )
 
     @staticmethod
-    def _reversion_adjustment(price: float) -> float:
-        """Nudge extreme prices back toward fair value."""
-        if price >= 0.90:
+    def _reversion_adj(price: float) -> float:
+        """Fade prices in extreme zones."""
+        if price > 0.90:
             return -(price - 0.90) * 0.30
-        if price <= 0.10:
+        if price < 0.10:
             return  (0.10 - price) * 0.30
         return 0.0
 
