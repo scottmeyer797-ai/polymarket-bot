@@ -190,6 +190,21 @@ def run_bot():
 
         bot_status["running"] = True
         bot_status["error"]   = ""
+
+        # ── Verify correct module versions are loaded ──────────────────────
+        import hashlib, inspect
+        ed_src = inspect.getsource(EdgeDetector)
+        ed_hash = hashlib.md5(ed_src.encode()).hexdigest()[:8]
+        has_new = "spread_edge" in ed_src
+        print(f"EDGE_DETECTOR_HASH={ed_hash} has_new_spread_logic={has_new}", flush=True)
+        _log.info(f"edge_detector version check: hash={ed_hash} spread_logic={has_new}",
+                  extra={"_event": "version_check", "_ed_hash": ed_hash, "_has_spread_logic": has_new})
+
+        # ── Force clear any stale pyc ──────────────────────────────────────
+        import shutil, pathlib
+        for p in pathlib.Path(".").rglob("__pycache__"):
+            shutil.rmtree(p, ignore_errors=True)
+
         _log.info("Bot thread started successfully.")
 
         cached_cross_scores: dict[str, float] = {}
