@@ -1,11 +1,5 @@
 """
 main.py — Flask dashboard + single-threaded bot loop.
-
-Fixes applied:
-  - Removed broken `from polymarket_bot import ...` package imports
-  - Corrected module names to match actual flat file structure
-  - Wired bot_status to real module output values
-  - Bot thread failure no longer silently zeros all metrics
 """
 from __future__ import annotations
 
@@ -16,8 +10,6 @@ import time
 from datetime import datetime
 
 from flask import Flask, jsonify
-
-# ─── Flask app ────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
 
@@ -66,18 +58,12 @@ def dashboard():
         body { background: #0d0d0d; color: #e0e0e0; font-family: 'Segoe UI', Arial, sans-serif; padding: 32px; }
         h1 { color: #66ccff; font-size: 1.6rem; margin-bottom: 24px; }
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
-        .card {
-            background: #1a1a1a; border: 1px solid #2a2a2a;
-            border-radius: 10px; padding: 18px 20px;
-        }
+        .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 18px 20px; }
         .card .label { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
         .card .value { font-size: 1.4rem; font-weight: 600; margin-top: 6px; color: #fff; }
         .card.green .value { color: #4caf50; }
         .card.red   .value { color: #f44336; }
         .card.blue  .value { color: #66ccff; }
-        .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
-                      background: #f44336; margin-right: 8px; }
-        .status-dot.on { background: #4caf50; }
         #error-bar { display: none; background: #3a1a1a; border: 1px solid #f44336;
                      color: #f44336; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
         .updated { font-size: 0.75rem; color: #555; margin-top: 20px; }
@@ -88,7 +74,6 @@ def dashboard():
     <div id="error-bar"></div>
     <div class="grid" id="grid"></div>
     <div class="updated" id="updated"></div>
-
 <script>
 const FIELDS = [
     { key: "running",          label: "Bot Running",        fmt: v => v ? "YES" : "NO",     cls: v => v ? "green" : "red" },
@@ -104,39 +89,26 @@ const FIELDS = [
     { key: "circuit_breaker",  label: "Circuit Breaker",    fmt: v => v ? "TRIPPED" : "OK", cls: v => v ? "red" : "green" },
     { key: "last_cycle_secs",  label: "Last Cycle (s)",     fmt: v => v.toFixed(3) + "s",   cls: _ => "" },
 ];
-
 async function load() {
     try {
         const r = await fetch('/api/status');
         if (!r.ok) throw new Error("HTTP " + r.status);
         const d = await r.json();
-
         const errBar = document.getElementById('error-bar');
-        if (d.error) {
-            errBar.style.display = 'block';
-            errBar.textContent = '⚠ ' + d.error;
-        } else {
-            errBar.style.display = 'none';
-        }
-
+        if (d.error) { errBar.style.display = 'block'; errBar.textContent = '⚠ ' + d.error; }
+        else { errBar.style.display = 'none'; }
         const grid = document.getElementById('grid');
         grid.innerHTML = FIELDS.map(f => {
             const val = d[f.key] ?? 0;
             const cls = f.cls(val);
-            return `<div class="card ${cls}">
-                <div class="label">${f.label}</div>
-                <div class="value">${f.fmt(val)}</div>
-            </div>`;
+            return `<div class="card ${cls}"><div class="label">${f.label}</div><div class="value">${f.fmt(val)}</div></div>`;
         }).join('');
-
-        document.getElementById('updated').textContent =
-            'Last updated: ' + (d.last_updated || new Date().toISOString());
+        document.getElementById('updated').textContent = 'Last updated: ' + (d.last_updated || new Date().toISOString());
     } catch(e) {
         document.getElementById('error-bar').style.display = 'block';
         document.getElementById('error-bar').textContent = '⚠ Could not reach /api/status — ' + e.message;
     }
 }
-
 load();
 setInterval(load, 5000);
 </script>
@@ -144,28 +116,17 @@ setInterval(load, 5000);
 </html>"""
 
 
-# ─── CSV trade logger ─────────────────────────────────────────────────────────
-
 def log_trade_csv(action, market_id, side, size, price, pnl=None):
     file_exists = os.path.isfile("trade_log.csv")
     with open("trade_log.csv", "a", newline="") as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["timestamp", "action", "market_id",
-                             "side", "size", "price", "pnl"])
-        writer.writerow([datetime.utcnow().isoformat(),
-                         action, market_id, side, size, price, pnl])
+            writer.writerow(["timestamp", "action", "market_id", "side", "size", "price", "pnl"])
+        writer.writerow([datetime.utcnow().isoformat(), action, market_id, side, size, price, pnl])
 
-
-# ─── Bot thread ───────────────────────────────────────────────────────────────
 
 def run_bot():
-    """
-    Single bot loop. Imports are flat (no polymarket_bot package prefix).
-    All actual module names match the files on disk.
-    """
     try:
-        # ── Flat imports — files live alongside main.py ────────────────────────
         import config
         import logger as log_mod
         from market_scanner import MarketScanner
@@ -191,17 +152,16 @@ def run_bot():
         bot_status["running"] = True
         bot_status["error"]   = ""
 
-        # ── Verify correct module versions are loaded ──────────────────────
-        import hashlib, inspect
-        ed_src = inspect.getsource(EdgeDetector)
+        # ── Version check: confirm which edge_detector is loaded ──────────────
+        import hashlib, inspect, shutil, pathlib
+        ed_src  = inspect.getsource(EdgeDetector)
         ed_hash = hashlib.md5(ed_src.encode()).hexdigest()[:8]
-        has_new = "spread_edge" in ed_src
-        print(f"EDGE_DETECTOR_HASH={ed_hash} has_new_spread_logic={has_new}", flush=True)
-        _log.info(f"edge_detector version check: hash={ed_hash} spread_logic={has_new}",
-                  extra={"_event": "version_check", "_ed_hash": ed_hash, "_has_spread_logic": has_new})
+        has_gap = "gap = 1.0 - total" in ed_src
+        print(f"EDGE_DETECTOR_HASH={ed_hash} has_gap_logic={has_gap}", flush=True)
+        _log.info(f"edge_detector version: hash={ed_hash} gap_logic={has_gap}",
+                  extra={"_event": "version_check", "_ed_hash": ed_hash, "_has_gap_logic": has_gap})
 
-        # ── Force clear any stale pyc ──────────────────────────────────────
-        import shutil, pathlib
+        # ── Wipe __pycache__ so stale .pyc never wins ─────────────────────────
         for p in pathlib.Path(".").rglob("__pycache__"):
             shutil.rmtree(p, ignore_errors=True)
 
@@ -215,11 +175,20 @@ def run_bot():
             cycle_start = time.monotonic()
 
             try:
-                # ── Scan ──────────────────────────────────────────────────────
                 all_markets    = scanner.get_markets()
                 liquid_markets = liq_filt.filter(all_markets)
 
-                # ── Cross-market (every 3rd cycle) ────────────────────────────
+                # ── Print raw sample on cycle 1 so we can see actual API prices
+                if cycle == 1 and liquid_markets:
+                    s = liquid_markets[0]
+                    print(
+                        f"SAMPLE_MARKET: yes={s.yes_price} no={s.no_price} "
+                        f"sum={round(s.yes_price+s.no_price,6)} "
+                        f"spread={s.spread} liq={s.liquidity} "
+                        f"vol={s.volume_24h} q={s.question[:60]}",
+                        flush=True
+                    )
+
                 cross_count = 0
                 if cycle % 3 == 0 and liquid_markets:
                     cross_signals = cross_det.detect(liquid_markets)
@@ -232,13 +201,11 @@ def run_bot():
                             sig.contradiction_score,
                         )
 
-                # ── Edge detection ────────────────────────────────────────────
                 candidates = edge_det.detect(
                     liquid_markets,
                     cross_market_scores=cached_cross_scores,
                 )
 
-                # ── Trade cycle ───────────────────────────────────────────────
                 deployed = portfolio.deployed_capital
                 opens    = portfolio.open_position_count
 
@@ -285,11 +252,9 @@ def run_bot():
                     if deployed >= config.MAX_TOTAL_CAPITAL_DEPLOYED:
                         break
 
-                # ── Fills + cleanup ───────────────────────────────────────────
                 trader.check_fills()
                 trader.cancel_stale_orders()
 
-                # ── Update shared status dict ─────────────────────────────────
                 summary = portfolio.summary()
                 bot_status.update({
                     "cycles":           cycle,
@@ -316,14 +281,11 @@ def run_bot():
             time.sleep(max(0.0, config.SCAN_INTERVAL_SEC - elapsed))
 
     except Exception as e:
-        # Capture startup crash — visible in dashboard error bar
         err_msg = f"BOT STARTUP FAILED: {type(e).__name__}: {e}"
         bot_status["running"] = False
         bot_status["error"]   = err_msg
-        print(err_msg)
+        print(err_msg, flush=True)
 
-
-# ─── Start ────────────────────────────────────────────────────────────────────
 
 def start_bot():
     t = threading.Thread(target=run_bot, name="bot", daemon=True)
