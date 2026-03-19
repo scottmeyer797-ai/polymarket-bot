@@ -1,299 +1,105 @@
-"""
-market_scanner.py — Fetches and caches active Polymarket markets
-"""
-
-from __future__ import annotations
-
+import requests
 import time
-from dataclasses import dataclass, field
-from typing import Any, List
-
-import config
-import logger as log_mod
-from utils import safe_get
-
-_log = log_mod.get_logger(__name__)
-
-
-# --------------------------------------------------
-# MARKET OBJECT
-# --------------------------------------------------
-
-@dataclass
-class Market:
-
-    market_id: str
-    condition_id: str
-    question: str
-
-    token_ids: List[str]
-
-    yes_price: float
-    no_price: float
-
-    spread: float
-
-    liquidity: float
-    volume_24h: float
-
-    active: bool
-
-    end_date_iso: str = ""
-
-    extra: dict[str, Any] = field(default_factory=dict)
-
-    # ---------------------------------------------
-
-    @property
-    def mid_yes(self) -> float:
-
-        return self.yes_price
-
-    def __repr__(self):
-
-        return (
-            f"Market({self.market_id[:8]} "
-            f"YES={self.yes_price:.3f} "
-            f"spread={self.spread:.4f} "
-            f"liq=${self.liquidity:.0f})"
-        )
-
-
-# --------------------------------------------------
-# SCANNER
-# --------------------------------------------------
 
 class MarketScanner:
 
-    def __init__(self):
+    def __init__(self, polymarket_client, opportunity_engine):
+        self.polymarket_client = polymarket_client
+        self.opportunity_engine = opportunity_engine
 
-        self._cache: List[Market] = []
+    # ---------- BINANCE DATA ----------
+    def get_binance_candles(self, symbol="BTCUSDT", interval="15m", limit=100):
+        url = "https://api.binance.com/api/v3/klines"
 
-        self._cache_time: float = 0.0
-
-        self._cache_ttl = 60  # seconds
-
-    # --------------------------------------------------
-
-    def get_markets(self) -> List[Market]:
-
-        now = time.monotonic()
-
-        if now - self._cache_time < self._cache_ttl:
-
-            return self._cache
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit
+        }
 
         try:
+            response = requests.get(url, params=params, timeout=5)
 
-            markets = self._fetch_markets()
+            if response.status_code != 200:
+                print(f"Binance bad status: {response.status_code}")
+                return []
 
-            self._cache = markets
+            data = response.json()
 
-            self._cache_time = now
+            candles = []
+            for k in data:
+                candles.append({
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5])
+                })
 
-            _log.info(
-                f"Scanner refreshed: {len(markets)} markets"
-            )
+            return candles
 
-        except Exception as exc:
+        except Exception as e:
+            print(f"Binance error: {e}")
+            return []
 
-            log_mod.log_error(
-                "market_scanner fetch failed",
-                exc
-            )
+    # ---------- MAIN SCAN ----------
+    def scan_markets(self):
+        try:
+            markets = self.polymarket_client.get_markets()
+        except Exception as e:
+            print(f"Error fetching markets: {e}")
+            return []
 
-        return self._cache
+        opportunities = []
 
-    # --------------------------------------------------
+        # Pull candles once
+        h4_candles = self.get_binance_candles(interval="4h", limit=100)
+        m15_candles = self.get_binance_candles(interval="15m", limit=100)
 
-    def _fetch_markets(self) -> List[Market]:
+        if not h4_candles or not m15_candles:
+            print("No candle data available")
+            return []
 
-        raw = self._gamma_markets()
-
-        markets: List[Market] = []
-
-        for item in raw:
-
+        for market in markets:
             try:
+                polymarket_price = market.get("price")
 
-                m = self._parse_gamma_market(item)
+                if polymarket_price is None:
+                    continue
 
-                if m:
-
-                    markets.append(m)
-
-            except Exception as exc:
-
-                _log.debug(
-                    f"Skipping malformed market: {exc}"
+                opportunity = self.opportunity_engine.find_opportunity(
+                    h4_candles,
+                    m15_candles,
+                    polymarket_price
                 )
 
-        return markets
+                if opportunity:
+                    opportunity["market_id"] = market.get("id")
+                    opportunity["question"] = market.get("question")
+                    opportunities.append(opportunity)
 
-    # --------------------------------------------------
+            except Exception as e:
+                print(f"Market processing error: {e}")
+                continue
 
-    def _gamma_markets(self) -> List[dict]:
+        return opportunities
 
-        results: List[dict] = []
+    # ---------- SAFE LOOP ----------
+    def run_once(self):
+        try:
+            opportunities = self.scan_markets()
 
-        offset = 0
-        limit = 100
-
-        while True:
-
-            url = (
-                f"{config.GAMMA_API_BASE}/markets"
-                f"?active=true&closed=false"
-                f"&limit={limit}&offset={offset}"
-            )
-
-            data = safe_get(url, timeout=15)
-
-            if isinstance(data, list):
-
-                batch = data
-
-            elif isinstance(data, dict):
-
-                batch = data.get("markets", [])
-
+            if opportunities:
+                print(f"Found {len(opportunities)} opportunities:")
+                for opp in opportunities:
+                    print(opp)
             else:
+                print("No opportunities found")
 
-                break
+        except Exception as e:
+            print(f"Run error: {e}")
 
-            if not batch:
-
-                break
-
-            results.extend(batch)
-
-            if len(batch) < limit:
-
-                break
-
-            offset += limit
-
-            # safety cap
-            if offset >= 5000:
-
-                break
-
-        return results
-
-    # --------------------------------------------------
-
-    def _parse_gamma_market(self, item: dict) -> Market | None:
-
-        if not item.get("active"):
-            return None
-
-        if item.get("closed"):
-            return None
-
-        market_id = str(item.get("id", ""))
-        condition_id = str(item.get("conditionId", ""))
-
-        if not market_id or not condition_id:
-
-            return None
-
-        question = str(item.get("question", ""))
-
-        # ------------------------------------------
-        # TOKEN IDS
-        # ------------------------------------------
-
-        token_ids = item.get("clobTokenIds")
-
-        if not token_ids:
-
-            tokens = item.get("tokens", [])
-
-            token_ids = [
-                t.get("token_id")
-                for t in tokens
-                if t.get("token_id")
-            ]
-
-        if not token_ids or len(token_ids) < 2:
-
-            return None
-
-        token_ids = [str(t) for t in token_ids[:2]]
-
-        # ------------------------------------------
-        # PRICES
-        # ------------------------------------------
-
-        tokens_raw = item.get("tokens", [])
-
-        yes_price = 0.5
-        no_price = 0.5
-
-        if len(tokens_raw) >= 2:
-
-            try:
-
-                yes_price = float(
-                    tokens_raw[0].get("price", 0.5)
-                )
-
-                no_price = float(
-                    tokens_raw[1].get("price", 0.5)
-                )
-
-            except Exception:
-
-                pass
-
-        # clamp probabilities
-
-        yes_price = max(0.01, min(0.99, yes_price))
-        no_price = max(0.01, min(0.99, no_price))
-
-        # ------------------------------------------
-        # SPREAD
-        # ------------------------------------------
-
-        spread = abs((yes_price + no_price) - 1.0)
-
-        # ------------------------------------------
-        # LIQUIDITY
-        # ------------------------------------------
-
-        liquidity = float(
-            item.get("liquidity", 0)
-            or item.get("liquidityUSD", 0)
-            or 0
-        )
-
-        volume_24h = float(
-            item.get("volume24hr", 0)
-            or item.get("volume", 0)
-            or 0
-        )
-
-        # ------------------------------------------
-
-        return Market(
-
-            market_id=market_id,
-            condition_id=condition_id,
-            question=question,
-
-            token_ids=token_ids,
-
-            yes_price=yes_price,
-            no_price=no_price,
-
-            spread=spread,
-
-            liquidity=liquidity,
-            volume_24h=volume_24h,
-
-            active=True,
-
-            end_date_iso=item.get("endDate", ""),
-
-            extra=item,
-        )
+    def run(self, interval=10):
+        while True:
+            self.run_once()
+            time.sleep(interval)
