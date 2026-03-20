@@ -1,5 +1,4 @@
 import requests
-import time
 
 
 class MarketScanner:
@@ -7,34 +6,30 @@ class MarketScanner:
     def __init__(self, polymarket_client, opportunity_engine):
         self.opportunity_engine = opportunity_engine
 
-    # ---------- POLYMARKET DATA ----------
+    # ---------- POLYMARKET ----------
     def get_polymarket_markets(self):
         try:
             url = "https://gamma-api.polymarket.com/markets"
             response = requests.get(url, timeout=5)
 
             if response.status_code != 200:
-                print(f"Polymarket API error: {response.status_code}")
                 return []
 
             data = response.json()
-
             markets = []
 
             for m in data:
                 try:
-                    if not m.get("active", False):
+                    if not m.get("active"):
                         continue
 
                     outcomes = m.get("outcomes", [])
-
                     if len(outcomes) < 2:
                         continue
 
                     yes_price = float(outcomes[0].get("price", 0))
                     no_price  = float(outcomes[1].get("price", 0))
 
-                    # Basic validation
                     if not (0 < yes_price < 1 and 0 < no_price < 1):
                         continue
 
@@ -45,16 +40,16 @@ class MarketScanner:
                         "no_price": no_price
                     })
 
-                except Exception:
+                except:
                     continue
 
             return markets
 
         except Exception as e:
-            print(f"Polymarket fetch error: {e}")
+            print(f"Polymarket error: {e}")
             return []
 
-    # ---------- BINANCE DATA ----------
+    # ---------- BINANCE ----------
     def get_binance_candles(self, interval="15m", limit=100):
         try:
             url = "https://api.binance.com/api/v3/klines"
@@ -71,28 +66,26 @@ class MarketScanner:
 
             data = response.json()
 
-            candles = []
-            for k in data:
-                candles.append({
+            return [
+                {
                     "open": float(k[1]),
                     "high": float(k[2]),
                     "low": float(k[3]),
                     "close": float(k[4])
-                })
-
-            return candles
+                }
+                for k in data
+            ]
 
         except Exception as e:
             print(f"Binance error: {e}")
             return []
 
-    # ---------- MAIN SCAN ----------
+    # ---------- MAIN ----------
     def scan_markets(self):
         try:
             markets = self.get_polymarket_markets()
-
-            h4 = self.get_binance_candles(interval="4h")
-            m15 = self.get_binance_candles(interval="15m")
+            h4 = self.get_binance_candles("4h")
+            m15 = self.get_binance_candles("15m")
 
             if not markets or not h4 or not m15:
                 return []
@@ -101,13 +94,10 @@ class MarketScanner:
 
             for m in markets:
                 try:
-                    # Decide which side to evaluate
-                    price = m["yes_price"]
-
                     opp = self.opportunity_engine.find_opportunity(
                         h4,
                         m15,
-                        price
+                        m["yes_price"]
                     )
 
                     if opp:
@@ -115,7 +105,7 @@ class MarketScanner:
                         opp["question"] = m["question"]
                         opportunities.append(opp)
 
-                except Exception:
+                except:
                     continue
 
             return opportunities
