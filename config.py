@@ -7,6 +7,7 @@ import os
 
 # ---------- LOGGING ----------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_FILE  = os.getenv("LOG_FILE", "bot.log")  # ✅ FIXED
 
 
 # ---------- CORE BOT SETTINGS ----------
